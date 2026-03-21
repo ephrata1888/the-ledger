@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional
 
 import asyncpg
+import asyncpg.exceptions
 
 from src.models.events import (
     BaseEvent,
@@ -64,7 +65,11 @@ class EventStore:
         causation_id: str | None = None,
     ) -> int:
         if not events:
-            raise DomainError("append() requires at least one event")
+            raise DomainError(
+                "APPEND_EMPTY_BATCH",
+                "append() requires at least one event",
+                {"stream_id": stream_id},
+            )
 
         aggregate_type = _aggregate_type_from_stream_id(stream_id)
 
@@ -77,135 +82,158 @@ class EventStore:
 
         # Single atomic transaction: event_streams version gate + events insert + outbox rows + version update
         async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    """
-                    SELECT current_version, archived_at
-                    FROM event_streams
-                    WHERE stream_id = $1
-                    FOR UPDATE
-                    """,
-                    stream_id,
-                )
-
-                if row is None:
-                    if expected_version != -1:
-                        raise OptimisticConcurrencyError(
-                            f"Stream {stream_id} does not exist; expected_version={expected_version}"
-                        )
-                    current_version = 0
-                    await conn.execute(
+            try:
+                async with conn.transaction():
+                    row = await conn.fetchrow(
                         """
-                        INSERT INTO event_streams (stream_id, aggregate_type, current_version, metadata)
-                        VALUES ($1, $2, 0, '{}'::jsonb)
+                        SELECT current_version, archived_at
+                        FROM event_streams
+                        WHERE stream_id = $1
+                        FOR UPDATE
                         """,
                         stream_id,
-                        aggregate_type,
                     )
-                else:
-                    if row["archived_at"] is not None:
-                        raise DomainError(f"Stream {stream_id} is archived; cannot append")
-                    current_version = int(row["current_version"])
-                    if expected_version == -1:
+
+                    if row is None:
+                        if expected_version != -1:
+                            raise OptimisticConcurrencyError(
+                                stream_id,
+                                expected_version,
+                                0,
+                                message=f"Stream {stream_id!r} does not exist",
+                            )
+                        current_version = 0
+                        await conn.execute(
+                            """
+                            INSERT INTO event_streams (stream_id, aggregate_type, current_version, metadata)
+                            VALUES ($1, $2, 0, '{}'::jsonb)
+                            """,
+                            stream_id,
+                            aggregate_type,
+                        )
+                    else:
+                        if row["archived_at"] is not None:
+                            raise DomainError(
+                                "STREAM_ARCHIVED",
+                                f"Stream {stream_id!r} is archived; cannot append",
+                                {"stream_id": stream_id},
+                            )
+                        current_version = int(row["current_version"])
+                        if expected_version == -1:
+                            raise OptimisticConcurrencyError(
+                                stream_id,
+                                expected_version,
+                                current_version,
+                                message=f"Stream {stream_id!r} already exists; expected_version=-1 rejected",
+                            )
+
+                    expected_match = 0 if expected_version == -1 else expected_version
+                    if current_version != expected_match:
                         raise OptimisticConcurrencyError(
-                            f"Stream {stream_id} already exists; expected_version=-1 rejected"
+                            stream_id,
+                            expected_version,
+                            current_version,
                         )
 
-                if current_version != (0 if expected_version == -1 else expected_version):
-                    raise OptimisticConcurrencyError(
-                        f"Expected version {expected_version}, but current_version is {current_version}"
+                    # Prepare JSONB array for single INSERT..SELECT to assign stream_position deterministically.
+                    event_rows = []
+                    for ev in events:
+                        dumped = ev.model_dump(mode="json")
+                        event_rows.append(
+                            {
+                                "event_type": dumped["event_type"],
+                                "event_version": dumped["event_version"],
+                                "payload": dumped["payload"],
+                                "metadata": base_metadata,
+                            }
+                        )
+
+                    inserted = await conn.fetch(
+                        """
+                        WITH input AS (
+                          SELECT $2::text[] AS evs
+                        ),
+                        unpacked AS (
+                          SELECT
+                            (e->>'event_type')::text AS event_type,
+                            (e->>'event_version')::int AS event_version,
+                            (e->'payload') AS payload,
+                            (e->'metadata') AS metadata,
+                            ordinality
+                          FROM input,
+                               unnest(input.evs) WITH ORDINALITY AS t(e_text, ordinality),
+                               LATERAL (SELECT (e_text::jsonb) AS e) AS j
+                        ),
+                        ins AS (
+                          INSERT INTO events (
+                            stream_id,
+                            stream_position,
+                            event_type,
+                            event_version,
+                            payload,
+                            metadata
+                          )
+                          SELECT
+                            $1,
+                            $3 + ROW_NUMBER() OVER (ORDER BY ordinality),
+                            event_type,
+                            event_version,
+                            payload,
+                            metadata
+                          FROM unpacked
+                          RETURNING event_id, stream_id, stream_position, global_position, event_type,
+                                    event_version, payload, metadata, recorded_at
+                        )
+                        SELECT * FROM ins ORDER BY stream_position ASC
+                        """,
+                        stream_id,
+                        [json.dumps(r) for r in event_rows],
+                        current_version,
                     )
 
-                # Prepare JSONB array for single INSERT..SELECT to assign stream_position deterministically.
-                event_rows = []
-                for ev in events:
-                    event_rows.append(
-                        {
-                            "event_type": ev.event_type,
-                            "event_version": ev.event_version,
-                            "payload": ev.payload,
-                            "metadata": base_metadata,
+                    # Outbox: one row per stored event, same transaction.
+                    for r in inserted:
+                        outbox_payload = {
+                            "event_id": str(r["event_id"]),
+                            "stream_id": r["stream_id"],
+                            "stream_position": int(r["stream_position"]),
+                            "global_position": int(r["global_position"]),
+                            "event_type": r["event_type"],
+                            "event_version": int(r["event_version"]),
+                            "payload": r["payload"],
+                            "metadata": r["metadata"],
+                            "recorded_at": r["recorded_at"].isoformat(),
                         }
-                    )
+                        await conn.execute(
+                            """
+                            INSERT INTO outbox (event_id, destination, payload)
+                            VALUES ($1, $2, $3::jsonb)
+                            """,
+                            r["event_id"],
+                            self._config.outbox_destination,
+                            json.dumps(outbox_payload),
+                        )
 
-                inserted = await conn.fetch(
-                    """
-                    WITH input AS (
-                      SELECT $2::text[] AS evs
-                    ),
-                    unpacked AS (
-                      SELECT
-                        (e->>'event_type')::text AS event_type,
-                        (e->>'event_version')::int AS event_version,
-                        (e->'payload') AS payload,
-                        (e->'metadata') AS metadata,
-                        ordinality
-                      FROM input,
-                           unnest(input.evs) WITH ORDINALITY AS t(e_text, ordinality),
-                           LATERAL (SELECT (e_text::jsonb) AS e) AS j
-                    ),
-                    ins AS (
-                      INSERT INTO events (
-                        stream_id,
-                        stream_position,
-                        event_type,
-                        event_version,
-                        payload,
-                        metadata
-                      )
-                      SELECT
-                        $1,
-                        $3 + ROW_NUMBER() OVER (ORDER BY ordinality),
-                        event_type,
-                        event_version,
-                        payload,
-                        metadata
-                      FROM unpacked
-                      RETURNING event_id, stream_id, stream_position, global_position, event_type,
-                                event_version, payload, metadata, recorded_at
-                    )
-                    SELECT * FROM ins ORDER BY stream_position ASC
-                    """,
-                    stream_id,
-                    [json.dumps(r) for r in event_rows],
-                    current_version,
-                )
-
-                # Outbox: one row per stored event, same transaction.
-                for r in inserted:
-                    outbox_payload = {
-                        "event_id": str(r["event_id"]),
-                        "stream_id": r["stream_id"],
-                        "stream_position": int(r["stream_position"]),
-                        "global_position": int(r["global_position"]),
-                        "event_type": r["event_type"],
-                        "event_version": int(r["event_version"]),
-                        "payload": r["payload"],
-                        "metadata": r["metadata"],
-                        "recorded_at": r["recorded_at"].isoformat(),
-                    }
+                    new_version = current_version + len(events)
                     await conn.execute(
                         """
-                        INSERT INTO outbox (event_id, destination, payload)
-                        VALUES ($1, $2, $3::jsonb)
+                        UPDATE event_streams
+                        SET current_version = $2
+                        WHERE stream_id = $1
                         """,
-                        r["event_id"],
-                        self._config.outbox_destination,
-                        json.dumps(outbox_payload),
+                        stream_id,
+                        new_version,
                     )
 
-                new_version = current_version + len(events)
-                await conn.execute(
-                    """
-                    UPDATE event_streams
-                    SET current_version = $2
-                    WHERE stream_id = $1
-                    """,
+                    return new_version
+            except asyncpg.exceptions.UniqueViolationError:
+                actual = await self.stream_version(stream_id)
+                raise OptimisticConcurrencyError(
                     stream_id,
-                    new_version,
-                )
-
-                return new_version
+                    expected_version,
+                    actual,
+                    message=f"Unique violation on (stream_id, stream_position) for {stream_id!r}",
+                ) from None
 
     async def load_stream(
         self,
@@ -334,7 +362,11 @@ class EventStore:
                 stream_id,
             )
         if row is None:
-            raise DomainError(f"Stream {stream_id} not found")
+            raise DomainError(
+                "STREAM_NOT_FOUND",
+                f"Stream {stream_id!r} not found",
+                {"stream_id": stream_id},
+            )
         return StreamMetadata(
             stream_id=row["stream_id"],
             aggregate_type=row["aggregate_type"],
