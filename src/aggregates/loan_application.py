@@ -6,23 +6,41 @@ Never store PII in the payload without encryption.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Tuple
 
 from src.aggregates.compliance_record import ComplianceRecordAggregate
 from src.event_store import EventStore
-from src.models.events import DomainError, StoredEvent
+from src.models.events import (
+    ApplicationSubmittedPayload,
+    DecisionGeneratedPayload,
+    DomainError,
+    HumanReviewCompletedPayload,
+    StoredEvent,
+)
 
 
 class ApplicationState(str, Enum):
+    """Seven-state loan lifecycle (strict)."""
+
     SUBMITTED = "SUBMITTED"
     AWAITING_ANALYSIS = "AWAITING_ANALYSIS"
     ANALYSIS_COMPLETE = "ANALYSIS_COMPLETE"
     COMPLIANCE_REVIEW = "COMPLIANCE_REVIEW"
     PENDING_DECISION = "PENDING_DECISION"
-    APPROVED_PENDING_HUMAN = "APPROVED_PENDING_HUMAN"
-    DECLINED_PENDING_HUMAN = "DECLINED_PENDING_HUMAN"
-    FINAL_APPROVED = "FINAL_APPROVED"
-    FINAL_DECLINED = "FINAL_DECLINED"
+    DECIDED_PENDING_HUMAN = "DECIDED_PENDING_HUMAN"
+    FINAL_VERDICT = "FINAL_VERDICT"
+
+
+# Directed edges (from_state, to_state) allowed by the state machine.
+_VALID_TRANSITIONS: Set[Tuple[ApplicationState | None, ApplicationState]] = {
+    (None, ApplicationState.SUBMITTED),
+    (ApplicationState.SUBMITTED, ApplicationState.AWAITING_ANALYSIS),
+    (ApplicationState.AWAITING_ANALYSIS, ApplicationState.ANALYSIS_COMPLETE),
+    (ApplicationState.ANALYSIS_COMPLETE, ApplicationState.COMPLIANCE_REVIEW),
+    (ApplicationState.COMPLIANCE_REVIEW, ApplicationState.PENDING_DECISION),
+    (ApplicationState.PENDING_DECISION, ApplicationState.DECIDED_PENDING_HUMAN),
+    (ApplicationState.DECIDED_PENDING_HUMAN, ApplicationState.FINAL_VERDICT),
+}
 
 
 class LoanApplicationAggregate:
@@ -35,7 +53,7 @@ class LoanApplicationAggregate:
         self._fraud_screening_done: bool = False
         self._credit_analysis_done: bool = False
         self._last_decision_recommendation: str | None = None
-        self._human_review_override: bool = False
+        self._human_line_decision: str | None = None  # "APPROVE" | "DECLINE" after human review
 
     def _apply(self, event: StoredEvent) -> None:
         handler = getattr(self, f"_on_{event.event_type}", None)
@@ -43,52 +61,87 @@ class LoanApplicationAggregate:
             handler(event)
         self.version = event.stream_position
 
-    # --- transition helpers (Rule 1) ---
+    # --- State machine guards ---
+
+    def assert_can_transition_to(self, new_state: ApplicationState) -> None:
+        """Raise DomainError if current -> new_state is not in the allowed graph."""
+        if self.state == new_state:
+            return
+        key = (self.state, new_state)
+        if key not in _VALID_TRANSITIONS:
+            raise DomainError(
+                "INVALID_STATE_TRANSITION",
+                f"Cannot transition {self.state!r} -> {new_state!r}",
+                {
+                    "application_id": self.application_id,
+                    "from_state": self.state.value if self.state else None,
+                    "to_state": new_state.value,
+                },
+            )
 
     def _require_states(self, allowed: Set[ApplicationState], event_type: str) -> None:
         if self.state not in allowed:
             raise DomainError(
-                f"Invalid state for {event_type}: current={self.state}, allowed={allowed}"
+                "INVALID_STATE_FOR_EVENT",
+                f"Invalid state for {event_type}: current={self.state}, allowed={sorted(s.value for s in allowed)}",
+                {
+                    "application_id": self.application_id,
+                    "event_type": event_type,
+                    "current_state": self.state.value if self.state else None,
+                    "allowed_states": [s.value for s in allowed],
+                },
             )
 
-    def _enter_compliance_review_if_ready(self) -> None:
+    def _maybe_enter_analysis_complete(self) -> None:
         if (
             self.state == ApplicationState.AWAITING_ANALYSIS
             and self._fraud_screening_done
             and self._credit_analysis_done
         ):
-            # ANALYSIS_COMPLETE (logical) and COMPLIANCE_REVIEW are represented by this state:
-            # catalogue has no separate loan event between the two phases.
-            self.state = ApplicationState.COMPLIANCE_REVIEW
+            self.assert_can_transition_to(ApplicationState.ANALYSIS_COMPLETE)
+            self.state = ApplicationState.ANALYSIS_COMPLETE
 
     # --- event handlers ---
 
     def _on_ApplicationSubmitted(self, event: StoredEvent) -> None:
         if self.state is not None:
-            raise DomainError("ApplicationSubmitted: stream must start empty")
+            raise DomainError(
+                "LOAN_STREAM_NOT_EMPTY",
+                "ApplicationSubmitted: stream must start empty",
+                {"application_id": self.application_id},
+            )
+        p = ApplicationSubmittedPayload.model_validate(event.payload)
+        self.assert_can_transition_to(ApplicationState.SUBMITTED)
         self.state = ApplicationState.SUBMITTED
-        self.applicant_id = event.payload.get("applicant_id")
-        self.requested_amount_usd = event.payload.get("requested_amount_usd")
+        self.applicant_id = p.applicant_id
+        self.requested_amount_usd = p.requested_amount_usd
 
     def _on_CreditAnalysisRequested(self, event: StoredEvent) -> None:
         self._require_states({ApplicationState.SUBMITTED}, "CreditAnalysisRequested")
+        self.assert_can_transition_to(ApplicationState.AWAITING_ANALYSIS)
         self.state = ApplicationState.AWAITING_ANALYSIS
 
     def _on_FraudScreeningCompleted(self, event: StoredEvent) -> None:
         self._require_states({ApplicationState.AWAITING_ANALYSIS}, "FraudScreeningCompleted")
         self._fraud_screening_done = True
-        self._enter_compliance_review_if_ready()
+        self._maybe_enter_analysis_complete()
 
     def _on_CreditAnalysisCompleted(self, event: StoredEvent) -> None:
         self._require_states({ApplicationState.AWAITING_ANALYSIS}, "CreditAnalysisCompleted")
         self._credit_analysis_done = True
-        self._enter_compliance_review_if_ready()
+        self._maybe_enter_analysis_complete()
+
+    def _on_ComplianceReviewStarted(self, event: StoredEvent) -> None:
+        self._require_states({ApplicationState.ANALYSIS_COMPLETE}, "ComplianceReviewStarted")
+        self.assert_can_transition_to(ApplicationState.COMPLIANCE_REVIEW)
+        self.state = ApplicationState.COMPLIANCE_REVIEW
 
     def _on_DecisionGenerated(self, event: StoredEvent) -> None:
         self._require_states({ApplicationState.COMPLIANCE_REVIEW}, "DecisionGenerated")
-        # Rule 4 — recompute on replay so read-side matches persisted facts
-        rec = self._apply_confidence_floor(event.payload)
+        p = DecisionGeneratedPayload.model_validate(event.payload)
+        rec = self._apply_confidence_floor(p.model_dump())
         self._last_decision_recommendation = rec
+        self.assert_can_transition_to(ApplicationState.PENDING_DECISION)
         self.state = ApplicationState.PENDING_DECISION
 
     def _on_HumanReviewCompleted(self, event: StoredEvent) -> None:
@@ -96,28 +149,46 @@ class LoanApplicationAggregate:
             {ApplicationState.PENDING_DECISION},
             "HumanReviewCompleted",
         )
-        self._human_review_override = bool(event.payload.get("override"))
-        final = (event.payload.get("final_decision") or "").upper()
+        p = HumanReviewCompletedPayload.model_validate(event.payload)
+        final = p.final_decision.upper()
         if final in ("APPROVED", "APPROVE"):
-            self.state = ApplicationState.APPROVED_PENDING_HUMAN
+            self.assert_can_transition_to(ApplicationState.DECIDED_PENDING_HUMAN)
+            self.state = ApplicationState.DECIDED_PENDING_HUMAN
+            self._human_line_decision = "APPROVE"
         elif final in ("DECLINED", "DECLINE"):
-            self.state = ApplicationState.DECLINED_PENDING_HUMAN
+            self.assert_can_transition_to(ApplicationState.DECIDED_PENDING_HUMAN)
+            self.state = ApplicationState.DECIDED_PENDING_HUMAN
+            self._human_line_decision = "DECLINE"
         else:
-            self.state = ApplicationState.PENDING_DECISION
+            self._human_line_decision = None
 
     def _on_ApplicationApproved(self, event: StoredEvent) -> None:
         self._require_states(
-            {ApplicationState.APPROVED_PENDING_HUMAN},
+            {ApplicationState.DECIDED_PENDING_HUMAN},
             "ApplicationApproved",
         )
-        self.state = ApplicationState.FINAL_APPROVED
+        if self._human_line_decision != "APPROVE":
+            raise DomainError(
+                "INVALID_FINAL_EVENT",
+                "ApplicationApproved requires prior HumanReviewCompleted with final_decision APPROVE/APPROVED",
+                {"application_id": self.application_id, "human_line_decision": self._human_line_decision},
+            )
+        self.assert_can_transition_to(ApplicationState.FINAL_VERDICT)
+        self.state = ApplicationState.FINAL_VERDICT
 
     def _on_ApplicationDeclined(self, event: StoredEvent) -> None:
         self._require_states(
-            {ApplicationState.DECLINED_PENDING_HUMAN},
+            {ApplicationState.DECIDED_PENDING_HUMAN},
             "ApplicationDeclined",
         )
-        self.state = ApplicationState.FINAL_DECLINED
+        if self._human_line_decision != "DECLINE":
+            raise DomainError(
+                "INVALID_FINAL_EVENT",
+                "ApplicationDeclined requires prior HumanReviewCompleted with final_decision DECLINE/DECLINED",
+                {"application_id": self.application_id, "human_line_decision": self._human_line_decision},
+            )
+        self.assert_can_transition_to(ApplicationState.FINAL_VERDICT)
+        self.state = ApplicationState.FINAL_VERDICT
 
     # --- Rule 4 (used before append + kept consistent on replay) ---
 
@@ -141,8 +212,9 @@ class LoanApplicationAggregate:
     def validate_application_approved(self, compliance: ComplianceRecordAggregate) -> None:
         if not compliance.all_mandatory_checks_passed():
             raise DomainError(
-                "ApplicationApproved blocked (Rule 5): not all mandatory ComplianceRulePassed "
-                "events are present for required checks."
+                "RULE5_COMPLIANCE_GATE",
+                "ApplicationApproved blocked: not all mandatory ComplianceRulePassed events are present.",
+                {"application_id": self.application_id},
             )
 
     # --- Rule 6 ---
@@ -173,21 +245,39 @@ class LoanApplicationAggregate:
                 break
             if not found:
                 raise DomainError(
-                    f"DecisionGenerated causal chain invalid (Rule 6): session {session_key!r} "
-                    f"has no credit/fraud decision for application_id={application_id!r}."
+                    "RULE6_CAUSAL_CHAIN",
+                    f"DecisionGenerated causal chain invalid: session {session_key!r} "
+                    f"has no credit/fraud decision for application_id={application_id!r}.",
+                    {"application_id": application_id, "session_key": session_key},
                 )
+
+    def assert_may_submit_new_application(self) -> None:
+        """Handler guard: empty loan stream only."""
+        if self.version != 0 or self.state is not None:
+            raise DomainError(
+                "APPLICATION_ALREADY_EXISTS",
+                "Application already exists for this application_id.",
+                {
+                    "application_id": self.application_id,
+                    "version": self.version,
+                    "state": self.state.value if self.state else None,
+                },
+            )
 
     def assert_ready_for_credit_completion_on_loan(self) -> None:
         """Validate before appending CreditAnalysisCompleted to the loan stream."""
         self._require_states({ApplicationState.AWAITING_ANALYSIS}, "CreditAnalysisCompleted")
         if self._credit_analysis_done:
-            raise DomainError("Loan stream already has credit analysis completion for this application.")
+            raise DomainError(
+                "CREDIT_ANALYSIS_ALREADY_COMPLETE",
+                "Loan stream already has credit analysis completion for this application.",
+                {"application_id": self.application_id},
+            )
 
     def validate_replay_invariants(self, events: List[StoredEvent]) -> None:
         """Rule 2 companion for loan stream ordering (loan-specific events only)."""
         if not events:
             return
-        # Intentionally minimal: loan stream does not carry AgentContextLoaded.
 
     @classmethod
     async def load(cls, store: EventStore, application_id: str) -> "LoanApplicationAggregate":
