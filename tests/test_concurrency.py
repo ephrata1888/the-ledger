@@ -5,7 +5,17 @@ import asyncpg
 import pytest
 
 from src.event_store import EventStore
-from src.models.events import BaseEvent, OptimisticConcurrencyError
+from src.models.events import (
+    ApplicationSubmittedEvent,
+    ApplicationSubmittedPayload,
+    CreditAnalysisCompletedEvent,
+    CreditAnalysisCompletedPayload,
+    CreditAnalysisRequestedEvent,
+    CreditAnalysisRequestedPayload,
+    FraudScreeningCompletedEvent,
+    FraudScreeningCompletedPayload,
+    OptimisticConcurrencyError,
+)
 
 
 @pytest.mark.asyncio
@@ -19,34 +29,61 @@ async def test_double_decision_occ_collision(pool: asyncpg.Pool):
     store = EventStore(pool)
     stream_id = f"loan-{uuid4()}"
 
-    # Seed the stream to version 3
     await store.append(
         stream_id=stream_id,
         expected_version=-1,
-        events=[BaseEvent(event_type="ApplicationSubmitted", payload={"application_id": "A1"})],
+        events=[
+            ApplicationSubmittedEvent(
+                payload=ApplicationSubmittedPayload(
+                    application_id="A1",
+                    applicant_id="p1",
+                    requested_amount_usd=10_000.0,
+                    loan_purpose="test",
+                    submission_channel="api",
+                    submitted_at="2025-01-01T00:00:00Z",
+                )
+            )
+        ],
     )
     await store.append(
         stream_id=stream_id,
         expected_version=1,
-        events=[BaseEvent(event_type="CreditAnalysisRequested", payload={"application_id": "A1"})],
+        events=[
+            CreditAnalysisRequestedEvent(
+                payload=CreditAnalysisRequestedPayload(
+                    application_id="A1",
+                    assigned_agent_id="ag-1",
+                    requested_at="2025-01-01T00:00:01Z",
+                    priority="normal",
+                )
+            )
+        ],
     )
     await store.append(
         stream_id=stream_id,
         expected_version=2,
-        events=[BaseEvent(event_type="FraudScreeningCompleted", payload={"application_id": "A1", "fraud_score": 0.1})],
+        events=[
+            FraudScreeningCompletedEvent(
+                payload=FraudScreeningCompletedPayload(
+                    application_id="A1",
+                    fraud_score=0.1,
+                )
+            )
+        ],
     )
     assert await store.stream_version(stream_id) == 3
 
     async def try_append(agent_id: str):
-        # Each append() calls pool.acquire() internally; concurrent tasks use
-        # distinct connections when the pool has min_size>=2.
         return await store.append(
             stream_id=stream_id,
             expected_version=3,
             events=[
-                BaseEvent(
-                    event_type="CreditAnalysisCompleted",
-                    payload={"application_id": "A1", "agent_id": agent_id, "risk_tier": "MEDIUM"},
+                CreditAnalysisCompletedEvent(
+                    payload=CreditAnalysisCompletedPayload(
+                        application_id="A1",
+                        agent_id=agent_id,
+                        risk_tier="MEDIUM",
+                    )
                 )
             ],
         )
@@ -63,7 +100,9 @@ async def test_double_decision_occ_collision(pool: asyncpg.Pool):
     assert len(successes) == 1
     assert len(failures) == 1
     assert isinstance(failures[0], OptimisticConcurrencyError)
+    occ = failures[0]
+    assert occ.stream_id == stream_id
+    assert occ.expected_version == 3
 
     final_events = await store.load_stream(stream_id)
     assert len(final_events) == 4
-
