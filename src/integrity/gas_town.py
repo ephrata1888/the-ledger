@@ -34,6 +34,8 @@ class AgentContextReconstruction:
     pending_work: List[str]
     needs_reconciliation: bool
     approx_tokens_used: int
+    last_event_position: int = -1
+    session_health_status: str = "EMPTY"
 
 
 async def reconstruct_agent_context(
@@ -132,6 +134,14 @@ async def reconstruct_agent_context(
     if approx > token_budget:
         summary = summary[: max(0, len(summary) - (approx - token_budget) * 4)]
 
+    last_event_position = events[-1].stream_position if events else -1
+    if not events:
+        session_health_status = "EMPTY"
+    elif needs_reconciliation:
+        session_health_status = "NEEDS_RECONCILIATION"
+    else:
+        session_health_status = "OK"
+
     return AgentContextReconstruction(
         summary_prose=summary,
         verbatim_recent=verbatim_recent,
@@ -140,4 +150,6 @@ async def reconstruct_agent_context(
         pending_work=pending_work,
         needs_reconciliation=needs_reconciliation,
         approx_tokens_used=min(approx, token_budget),
+        last_event_position=last_event_position,
+        session_health_status=session_health_status,
     )

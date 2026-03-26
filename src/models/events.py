@@ -298,179 +298,195 @@ class QualityAssessmentCompletedPayload(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Base domain event envelope (catalogue)
+# ---------------------------------------------------------------------------
+
+
+class BaseEvent(BaseModel):
+    """
+    Base class for all domain events.
+    Every event type in the catalogue inherits from this.
+    Provides the common interface expected by EventStore.append().
+    Each subclass declares ``event_type: Literal[...]`` for the persisted discriminator.
+    """
+
+    model_config = ConfigDict(frozen=False, extra="allow")
+
+
+# ---------------------------------------------------------------------------
 # Discriminated domain events (append / replay)
 # ---------------------------------------------------------------------------
 
 
-class ApplicationSubmittedEvent(BaseModel):
+class ApplicationSubmittedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ApplicationSubmitted"] = "ApplicationSubmitted"
     event_version: int = 1
     payload: ApplicationSubmittedPayload
 
 
-class CreditAnalysisRequestedEvent(BaseModel):
+class CreditAnalysisRequestedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["CreditAnalysisRequested"] = "CreditAnalysisRequested"
     event_version: int = 1
     payload: CreditAnalysisRequestedPayload
 
 
-class CreditAnalysisCompletedEvent(BaseModel):
+class CreditAnalysisCompletedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["CreditAnalysisCompleted"] = "CreditAnalysisCompleted"
     event_version: int = 2
     payload: CreditAnalysisCompletedPayload
 
 
-class FraudScreeningCompletedEvent(BaseModel):
+class FraudScreeningCompletedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["FraudScreeningCompleted"] = "FraudScreeningCompleted"
     event_version: int = 1
     payload: FraudScreeningCompletedPayload
 
 
-class ComplianceCheckRequestedEvent(BaseModel):
+class ComplianceCheckRequestedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ComplianceCheckRequested"] = "ComplianceCheckRequested"
     event_version: int = 1
     payload: ComplianceCheckRequestedPayload
 
 
-class ComplianceRulePassedEvent(BaseModel):
+class ComplianceRulePassedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ComplianceRulePassed"] = "ComplianceRulePassed"
     event_version: int = 1
     payload: ComplianceRulePassedPayload
 
 
-class ComplianceRuleFailedEvent(BaseModel):
+class ComplianceRuleFailedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ComplianceRuleFailed"] = "ComplianceRuleFailed"
     event_version: int = 1
     payload: ComplianceRuleFailedPayload
 
 
-class ComplianceRuleNotedEvent(BaseModel):
+class ComplianceRuleNotedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ComplianceRuleNoted"] = "ComplianceRuleNoted"
     event_version: int = 1
     payload: ComplianceRuleNotedPayload
 
 
-class ComplianceCheckCompletedEvent(BaseModel):
+class ComplianceCheckCompletedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ComplianceCheckCompleted"] = "ComplianceCheckCompleted"
     event_version: int = 1
     payload: ComplianceCheckCompletedPayload
 
 
-class DecisionGeneratedEvent(BaseModel):
+class DecisionGeneratedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["DecisionGenerated"] = "DecisionGenerated"
     event_version: int = 2
     payload: DecisionGeneratedPayload
 
 
-class HumanReviewCompletedEvent(BaseModel):
+class HumanReviewCompletedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["HumanReviewCompleted"] = "HumanReviewCompleted"
     event_version: int = 1
     payload: HumanReviewCompletedPayload
 
 
-class HumanReviewRequestedEvent(BaseModel):
+class HumanReviewRequestedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["HumanReviewRequested"] = "HumanReviewRequested"
     event_version: int = 1
     payload: HumanReviewRequestedPayload
 
 
-class ApplicationApprovedEvent(BaseModel):
+class ApplicationApprovedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ApplicationApproved"] = "ApplicationApproved"
     event_version: int = 1
     payload: ApplicationApprovedPayload
 
 
-class ApplicationDeclinedEvent(BaseModel):
+class ApplicationDeclinedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ApplicationDeclined"] = "ApplicationDeclined"
     event_version: int = 1
     payload: ApplicationDeclinedPayload
 
 
-class AgentContextLoadedEvent(BaseModel):
+class AgentContextLoadedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["AgentContextLoaded"] = "AgentContextLoaded"
     event_version: int = 1
     payload: AgentContextLoadedPayload
 
 
-class AuditIntegrityCheckRunEvent(BaseModel):
+class AuditIntegrityCheckRunEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["AuditIntegrityCheckRun"] = "AuditIntegrityCheckRun"
     event_version: int = 1
     payload: AuditIntegrityCheckRunPayload
 
 
-class ComplianceReviewStartedEvent(BaseModel):
+class ComplianceReviewStartedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ComplianceReviewStarted"] = "ComplianceReviewStarted"
     event_version: int = 1
     payload: ComplianceReviewStartedPayload
 
 
-class SyntheticSeedEvent(BaseModel):
+class SyntheticSeedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["SyntheticSeedEvent"] = "SyntheticSeedEvent"
     event_version: int = 1
     payload: SyntheticSeedPayload
 
 
-class AgentNodeExecutedEvent(BaseModel):
+class AgentNodeExecutedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["AgentNodeExecuted"] = "AgentNodeExecuted"
     event_version: int = 1
     payload: AgentNodeExecutedPayload
 
 
-class AgentSessionCompletedEvent(BaseModel):
+class AgentSessionCompletedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["AgentSessionCompleted"] = "AgentSessionCompleted"
     event_version: int = 1
     payload: AgentSessionCompletedPayload
 
 
-class AgentSessionStartedEvent(BaseModel):
+class AgentSessionStartedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["AgentSessionStarted"] = "AgentSessionStarted"
     event_version: int = 1
     payload: AgentSessionStartedPayload
 
 
-class AgentSessionFailedEvent(BaseModel):
+class AgentSessionFailedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["AgentSessionFailed"] = "AgentSessionFailed"
     event_version: int = 1
     payload: AgentSessionFailedPayload
 
 
-class ExtractionCompletedEvent(BaseModel):
+class ExtractionCompletedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["ExtractionCompleted"] = "ExtractionCompleted"
     event_version: int = 1
     payload: ExtractionCompletedPayload
 
 
-class QualityAssessmentCompletedEvent(BaseModel):
+class QualityAssessmentCompletedEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["QualityAssessmentCompleted"] = "QualityAssessmentCompleted"
     event_version: int = 1
     payload: QualityAssessmentCompletedPayload
 
 
-class AgentOutputWrittenEvent(BaseModel):
+class AgentOutputWrittenEvent(BaseEvent):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["AgentOutputWritten"] = "AgentOutputWritten"
     event_version: int = 1
@@ -511,9 +527,6 @@ DomainEventDiscriminated = Annotated[
 ]
 
 DomainEventAdapter = TypeAdapter(DomainEventDiscriminated)
-
-# Type alias for `EventStore.append(..., events=[...])` (concrete event models).
-BaseEvent = DomainEventUnion
 
 
 def domain_event_to_storage_dict(ev: DomainEventUnion) -> Dict[str, Any]:

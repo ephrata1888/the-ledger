@@ -206,6 +206,26 @@ async def test_full_lifecycle_via_mcp_tools_only(
     )
     assert r_human.get("status") == "ok", f"record_human_review failed: {r_human!r}"
 
+    error_result = await call_tool(
+        mcp,
+        "submit_application",
+        {
+            "application_id": app_id,
+            "applicant_id": "COMP-031",
+            "requested_amount_usd": 100_000.0,
+            "loan_purpose": "duplicate_test",
+            "submission_channel": "test",
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "correlation_id": app_id,
+        },
+    )
+    assert error_result.get("status") == "error", (
+        f"Expected error on duplicate submission, got: {error_result}"
+    )
+    assert "suggested_action" in error_result, (
+        f"Error response missing suggested_action: {error_result}"
+    )
+
     raw = await read_resource(mcp, f"ledger://applications/{app_id}")
     summary = json.loads(raw)
     assert "error_type" not in summary, f"Resource returned error: {summary}"
@@ -213,8 +233,14 @@ async def test_full_lifecycle_via_mcp_tools_only(
 
     raw = await read_resource(mcp, f"ledger://applications/{app_id}/compliance")
     compliance = json.loads(raw)
-    assert "error_type" not in compliance
+    assert "error_type" not in compliance, f"Compliance resource error: {compliance}"
     assert compliance["overall_verdict"] == "CLEAR"
+    cs = compliance.get("compliance_state") or {}
+    passed = cs.get("passed_rules") or []
+    required = cs.get("required_checks") or []
+    assert len(passed) >= 1 or len(required) >= 1, (
+        f"Compliance resource does not reflect evaluated checks: {compliance}"
+    )
 
     raw = await read_resource(mcp, f"ledger://applications/{app_id}/audit-trail")
     trail = json.loads(raw)

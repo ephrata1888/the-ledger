@@ -61,3 +61,13 @@ async def test_reconstruct_after_five_events_continues_without_lost_work(pool: a
     assert ctx.needs_reconciliation is True
     assert any("n2" in p for p in ctx.pending_work)
     assert ctx.summary_prose
+
+    events_loaded = await store.load_stream(sid)
+    assert len(events_loaded) == 5
+    assert ctx.last_event_position == events_loaded[-1].stream_position, (
+        f"last_event_position {ctx.last_event_position} != "
+        f"actual last stream_position {events_loaded[-1].stream_position}"
+    )
+    assert ctx.session_health_status == "NEEDS_RECONCILIATION", (
+        f"unexpected session_health_status: {ctx.session_health_status!r}"
+    )
