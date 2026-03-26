@@ -16,6 +16,14 @@ load_dotenv(REPO_ROOT / ".env")
 
 from src.db.schema_apply import iter_schema_statements  # noqa: E402
 
+from datagen.seed_narr_companies import upsert_narr_companies  # noqa: E402
+
+
+@pytest_asyncio.fixture
+async def narr_companies_seeded(pool: asyncpg.Pool) -> None:
+    """NARR registry rows (COMP-031, …) for integration tests that need applicant_registry data."""
+    await upsert_narr_companies(pool)
+
 
 @pytest.fixture(scope="session")
 def database_url() -> str:
@@ -76,7 +84,22 @@ async def _apply_schema_and_truncate(pool: asyncpg.Pool):
         # in an explicit transaction — some PostgreSQL builds reject it.
         for statement in iter_schema_statements(sql):
             await conn.execute(statement)
+        # Tear down blue/green shadow tables from interrupted projection rebuilds
+        await conn.execute("DROP TABLE IF EXISTS projection_application_summary_green CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS projection_application_summary_old CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS projection_agent_performance_green CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS projection_agent_performance_old CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS compliance_audit_timeline_green CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS compliance_audit_timeline_old CASCADE;")
+        await conn.execute(
+            "DROP TABLE IF EXISTS projection_application_summary_caudit_green CASCADE;"
+        )
+        await conn.execute("TRUNCATE TABLE applicant_registry.companies RESTART IDENTITY CASCADE;")
         await conn.execute("TRUNCATE TABLE outbox RESTART IDENTITY CASCADE;")
+        await conn.execute("TRUNCATE TABLE projection_dead_letter RESTART IDENTITY CASCADE;")
+        await conn.execute("TRUNCATE TABLE compliance_audit_timeline RESTART IDENTITY CASCADE;")
+        await conn.execute("TRUNCATE TABLE projection_agent_performance RESTART IDENTITY CASCADE;")
+        await conn.execute("TRUNCATE TABLE projection_application_summary RESTART IDENTITY CASCADE;")
         await conn.execute("TRUNCATE TABLE events RESTART IDENTITY CASCADE;")
         await conn.execute("TRUNCATE TABLE event_streams RESTART IDENTITY CASCADE;")
         await conn.execute("TRUNCATE TABLE projection_checkpoints RESTART IDENTITY CASCADE;")
