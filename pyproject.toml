@@ -5,8 +5,10 @@ description = "TRP1 The Ledger - PostgreSQL-backed event store (Phase 1)"
 requires-python = ">=3.11"
 dependencies = [
   "asyncpg>=0.29.0",
+  "openai>=1.40.0",
   "pydantic>=2.6.0",
   "python-dotenv>=1.0.0",
+  "fastmcp>=3.0.0",
 ]
 
 [tool.pytest.ini_options]
