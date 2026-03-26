@@ -57,6 +57,12 @@ class AgentSessionAggregate:
     def _on_FraudScreeningCompleted(self, event: StoredEvent) -> None:
         pass
 
+    def _on_AgentSessionStarted(self, event: StoredEvent) -> None:
+        pass
+
+    def _on_AgentSessionFailed(self, event: StoredEvent) -> None:
+        pass
+
     # --- Rule 2: Gas Town ---
 
     def assert_context_loaded_for_decision(self) -> None:

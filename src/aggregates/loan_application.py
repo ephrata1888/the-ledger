@@ -11,10 +11,12 @@ from typing import Any, Dict, List, Set, Tuple
 from src.aggregates.compliance_record import ComplianceRecordAggregate
 from src.event_store import EventStore
 from src.models.events import (
+    ApplicationDeclinedPayload,
     ApplicationSubmittedPayload,
     DecisionGeneratedPayload,
     DomainError,
     HumanReviewCompletedPayload,
+    HumanReviewRequestedPayload,
     StoredEvent,
 )
 
@@ -40,6 +42,7 @@ _VALID_TRANSITIONS: Set[Tuple[ApplicationState | None, ApplicationState]] = {
     (ApplicationState.COMPLIANCE_REVIEW, ApplicationState.PENDING_DECISION),
     (ApplicationState.PENDING_DECISION, ApplicationState.DECIDED_PENDING_HUMAN),
     (ApplicationState.DECIDED_PENDING_HUMAN, ApplicationState.FINAL_VERDICT),
+    (ApplicationState.COMPLIANCE_REVIEW, ApplicationState.FINAL_VERDICT),
 }
 
 
@@ -144,6 +147,11 @@ class LoanApplicationAggregate:
         self.assert_can_transition_to(ApplicationState.PENDING_DECISION)
         self.state = ApplicationState.PENDING_DECISION
 
+    def _on_HumanReviewRequested(self, event: StoredEvent) -> None:
+        """Queue marker after automated decision; loan remains pending human verdict."""
+        self._require_states({ApplicationState.PENDING_DECISION}, "HumanReviewRequested")
+        HumanReviewRequestedPayload.model_validate(event.payload)
+
     def _on_HumanReviewCompleted(self, event: StoredEvent) -> None:
         self._require_states(
             {ApplicationState.PENDING_DECISION},
@@ -177,6 +185,15 @@ class LoanApplicationAggregate:
         self.state = ApplicationState.FINAL_VERDICT
 
     def _on_ApplicationDeclined(self, event: StoredEvent) -> None:
+        p = ApplicationDeclinedPayload.model_validate(event.payload)
+        if p.from_compliance_block:
+            self._require_states(
+                {ApplicationState.COMPLIANCE_REVIEW},
+                "ApplicationDeclined",
+            )
+            self.assert_can_transition_to(ApplicationState.FINAL_VERDICT)
+            self.state = ApplicationState.FINAL_VERDICT
+            return
         self._require_states(
             {ApplicationState.DECIDED_PENDING_HUMAN},
             "ApplicationDeclined",
