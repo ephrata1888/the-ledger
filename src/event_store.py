@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Optional
 
 import asyncpg
 import asyncpg.exceptions
@@ -14,6 +14,9 @@ from src.models.events import (
     StoredEvent,
     StreamMetadata,
 )
+
+if TYPE_CHECKING:
+    from src.upcasting.registry import UpcasterRegistry
 
 
 def _aggregate_type_from_stream_id(stream_id: str) -> str:
@@ -49,12 +52,13 @@ class EventStore:
         pool: asyncpg.Pool,
         *,
         config: EventStoreConfig | None = None,
+        upcaster_registry: Optional["UpcasterRegistry"] = None,
         upcast: Optional[Callable[[StoredEvent], StoredEvent]] = None,
     ) -> None:
         self._pool = pool
         self._config = config or EventStoreConfig()
-        # Phase 4 placeholder: UpcasterRegistry would be applied in load paths
-        self._upcast = upcast
+        self._upcaster_registry = upcaster_registry
+        self._legacy_upcast = upcast  # sync-only legacy hook (tests)
 
     async def append(
         self,
@@ -235,11 +239,27 @@ class EventStore:
                     message=f"Unique violation on (stream_id, stream_position) for {stream_id!r}",
                 ) from None
 
+    async def _finalize_loaded_event(
+        self,
+        ev: StoredEvent,
+        *,
+        apply_upcast: bool,
+    ) -> StoredEvent:
+        if not apply_upcast:
+            return ev
+        if self._upcaster_registry is not None:
+            return await self._upcaster_registry.upcast(ev, self)
+        if self._legacy_upcast is not None:
+            return self._legacy_upcast(ev)
+        return ev
+
     async def load_stream(
         self,
         stream_id: str,
         from_position: int = 0,
         to_position: int | None = None,
+        *,
+        apply_upcast: bool = True,
     ) -> List[StoredEvent]:
         sql = """
             SELECT event_id, stream_id, stream_position, global_position,
@@ -269,8 +289,7 @@ class EventStore:
                 metadata=_jsonb_to_dict(r["metadata"]),
                 recorded_at=r["recorded_at"],
             )
-            if self._upcast is not None:
-                ev = self._upcast(ev)
+            ev = await self._finalize_loaded_event(ev, apply_upcast=apply_upcast)
             out.append(ev)
         return out
 
@@ -279,6 +298,8 @@ class EventStore:
         from_global_position: int = 0,
         event_types: List[str] | None = None,
         batch_size: int = 500,
+        *,
+        apply_upcast: bool = True,
     ) -> AsyncIterator[StoredEvent]:
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0")
@@ -328,8 +349,7 @@ class EventStore:
                         metadata=_jsonb_to_dict(r["metadata"]),
                         recorded_at=r["recorded_at"],
                     )
-                    if self._upcast is not None:
-                        ev = self._upcast(ev)
+                    ev = await self._finalize_loaded_event(ev, apply_upcast=apply_upcast)
                     last = ev.global_position
                     yield ev
 

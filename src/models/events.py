@@ -80,11 +80,14 @@ class CreditAnalysisCompletedPayload(BaseModel):
     agent_id: str
     session_id: str = ""
     model_version: str = ""
-    confidence_score: float = 0.0
+    # None = unknown (v1 upcast / regulatory-safe); never fabricate a measured score.
+    confidence_score: Optional[float] = None
     risk_tier: str = ""
     recommended_limit_usd: float = 0.0
     analysis_duration_ms: int = 0
     input_data_hash: str = ""
+    regulatory_basis: str = ""
+    data_quality_caveats: List[str] = Field(default_factory=list)
 
 
 class FraudScreeningCompletedPayload(BaseModel):
@@ -120,6 +123,24 @@ class ComplianceRuleFailedPayload(BaseModel):
     rule_version: str
     failure_reason: str = ""
     remediation_required: bool = False
+    is_hard_block: bool = False
+
+
+class ComplianceRuleNotedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    application_id: str
+    rule_id: str = "REG-006"
+    rule_version: str = "1"
+    note_type: str = "CRA_CONSIDERATION"
+    evaluation_timestamp: str = ""
+
+
+class ComplianceCheckCompletedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    application_id: str
+    overall_verdict: Literal["BLOCKED", "CONDITIONAL", "CLEAR"] = "CLEAR"
+    evidence_summary: str = ""
+    evaluated_at: str = ""
 
 
 class DecisionGeneratedPayload(BaseModel):
@@ -142,6 +163,15 @@ class HumanReviewCompletedPayload(BaseModel):
     override_reason: str = ""
 
 
+class HumanReviewRequestedPayload(BaseModel):
+    """Loan-stream marker: committee or LO queue picked up the case after automated decision."""
+
+    model_config = ConfigDict(extra="forbid")
+    application_id: str
+    requested_by: str = ""
+    reason: str = ""
+
+
 class ApplicationApprovedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     application_id: str
@@ -158,6 +188,7 @@ class ApplicationDeclinedPayload(BaseModel):
     decline_reasons: List[str]
     declined_by: str = ""
     adverse_action_notice_required: bool = False
+    from_compliance_block: bool = False
 
 
 class AgentContextLoadedPayload(BaseModel):
@@ -173,10 +204,15 @@ class AgentContextLoadedPayload(BaseModel):
 class AuditIntegrityCheckRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     entity_id: str
+    entity_type: str = ""
     check_timestamp: str
     events_verified_count: int
     integrity_hash: str
     previous_hash: str = ""
+    chain_valid: bool = True
+    tamper_detected: bool = False
+    streams_audited: List[str] = Field(default_factory=list)
+    triggered_by: str = ""
 
 
 class ComplianceReviewStartedPayload(BaseModel):
@@ -193,6 +229,72 @@ class SyntheticSeedPayload(BaseModel):
     seq: int
     stream_shard: int = 0
     batch: str = ""
+
+
+class AgentNodeExecutedPayload(BaseModel):
+    """Agent workflow: node ran (may be partial before output is persisted)."""
+
+    model_config = ConfigDict(extra="forbid")
+    node_id: str
+    status: Literal["ok", "partial", "pending", "error"] = "ok"
+    detail: str = ""
+    llm_cost_usd: float = 0.0
+    llm_tokens_input: int = 0
+    llm_tokens_output: int = 0
+
+
+class AgentOutputWrittenPayload(BaseModel):
+    """Agent workflow: durable output recorded for a node."""
+
+    model_config = ConfigDict(extra="forbid")
+    node_id: str
+    output_id: str
+    content_ref: str = ""
+
+
+class AgentSessionCompletedPayload(BaseModel):
+    """Terminal aggregate marker: session finished with rolled-up LLM usage (Sentinel / cost)."""
+
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str = ""
+    session_id: str = ""
+    total_nodes_executed: int = 0
+    total_llm_cost_usd: float = 0.0
+    total_llm_tokens_input: int = 0
+    total_llm_tokens_output: int = 0
+    summary: str = ""
+
+
+class AgentSessionStartedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str
+    session_id: str
+    context_source: str = ""
+    started_at: str = ""
+
+
+class AgentSessionFailedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str
+    session_id: str
+    failed_at_node: str = ""
+    recoverable: bool = False
+    error_message: str = ""
+
+
+class ExtractionCompletedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    application_id: str
+    company_id: str
+    facts: Dict[str, Any] = Field(default_factory=dict)
+
+
+class QualityAssessmentCompletedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    application_id: str
+    company_id: str
+    critical_missing_fields: List[str] = Field(default_factory=list)
+    assessment_excerpt: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +351,20 @@ class ComplianceRuleFailedEvent(BaseModel):
     payload: ComplianceRuleFailedPayload
 
 
+class ComplianceRuleNotedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["ComplianceRuleNoted"] = "ComplianceRuleNoted"
+    event_version: int = 1
+    payload: ComplianceRuleNotedPayload
+
+
+class ComplianceCheckCompletedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["ComplianceCheckCompleted"] = "ComplianceCheckCompleted"
+    event_version: int = 1
+    payload: ComplianceCheckCompletedPayload
+
+
 class DecisionGeneratedEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     event_type: Literal["DecisionGenerated"] = "DecisionGenerated"
@@ -261,6 +377,13 @@ class HumanReviewCompletedEvent(BaseModel):
     event_type: Literal["HumanReviewCompleted"] = "HumanReviewCompleted"
     event_version: int = 1
     payload: HumanReviewCompletedPayload
+
+
+class HumanReviewRequestedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["HumanReviewRequested"] = "HumanReviewRequested"
+    event_version: int = 1
+    payload: HumanReviewRequestedPayload
 
 
 class ApplicationApprovedEvent(BaseModel):
@@ -305,6 +428,55 @@ class SyntheticSeedEvent(BaseModel):
     payload: SyntheticSeedPayload
 
 
+class AgentNodeExecutedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["AgentNodeExecuted"] = "AgentNodeExecuted"
+    event_version: int = 1
+    payload: AgentNodeExecutedPayload
+
+
+class AgentSessionCompletedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["AgentSessionCompleted"] = "AgentSessionCompleted"
+    event_version: int = 1
+    payload: AgentSessionCompletedPayload
+
+
+class AgentSessionStartedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["AgentSessionStarted"] = "AgentSessionStarted"
+    event_version: int = 1
+    payload: AgentSessionStartedPayload
+
+
+class AgentSessionFailedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["AgentSessionFailed"] = "AgentSessionFailed"
+    event_version: int = 1
+    payload: AgentSessionFailedPayload
+
+
+class ExtractionCompletedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["ExtractionCompleted"] = "ExtractionCompleted"
+    event_version: int = 1
+    payload: ExtractionCompletedPayload
+
+
+class QualityAssessmentCompletedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["QualityAssessmentCompleted"] = "QualityAssessmentCompleted"
+    event_version: int = 1
+    payload: QualityAssessmentCompletedPayload
+
+
+class AgentOutputWrittenEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["AgentOutputWritten"] = "AgentOutputWritten"
+    event_version: int = 1
+    payload: AgentOutputWrittenPayload
+
+
 DomainEventUnion = Union[
     ApplicationSubmittedEvent,
     CreditAnalysisRequestedEvent,
@@ -313,7 +485,10 @@ DomainEventUnion = Union[
     ComplianceCheckRequestedEvent,
     ComplianceRulePassedEvent,
     ComplianceRuleFailedEvent,
+    ComplianceRuleNotedEvent,
+    ComplianceCheckCompletedEvent,
     DecisionGeneratedEvent,
+    HumanReviewRequestedEvent,
     HumanReviewCompletedEvent,
     ApplicationApprovedEvent,
     ApplicationDeclinedEvent,
@@ -321,6 +496,13 @@ DomainEventUnion = Union[
     AuditIntegrityCheckRunEvent,
     ComplianceReviewStartedEvent,
     SyntheticSeedEvent,
+    AgentNodeExecutedEvent,
+    AgentSessionCompletedEvent,
+    AgentSessionStartedEvent,
+    AgentSessionFailedEvent,
+    ExtractionCompletedEvent,
+    QualityAssessmentCompletedEvent,
+    AgentOutputWrittenEvent,
 ]
 
 DomainEventDiscriminated = Annotated[
@@ -387,7 +569,10 @@ PAYLOAD_TYPES: Dict[str, type[BaseModel]] = {
     "ComplianceCheckRequested": ComplianceCheckRequestedPayload,
     "ComplianceRulePassed": ComplianceRulePassedPayload,
     "ComplianceRuleFailed": ComplianceRuleFailedPayload,
+    "ComplianceRuleNoted": ComplianceRuleNotedPayload,
+    "ComplianceCheckCompleted": ComplianceCheckCompletedPayload,
     "DecisionGenerated": DecisionGeneratedPayload,
+    "HumanReviewRequested": HumanReviewRequestedPayload,
     "HumanReviewCompleted": HumanReviewCompletedPayload,
     "ApplicationApproved": ApplicationApprovedPayload,
     "ApplicationDeclined": ApplicationDeclinedPayload,
@@ -395,6 +580,13 @@ PAYLOAD_TYPES: Dict[str, type[BaseModel]] = {
     "AuditIntegrityCheckRun": AuditIntegrityCheckRunPayload,
     "ComplianceReviewStarted": ComplianceReviewStartedPayload,
     "SyntheticSeedEvent": SyntheticSeedPayload,
+    "AgentNodeExecuted": AgentNodeExecutedPayload,
+    "AgentSessionCompleted": AgentSessionCompletedPayload,
+    "AgentSessionStarted": AgentSessionStartedPayload,
+    "AgentSessionFailed": AgentSessionFailedPayload,
+    "ExtractionCompleted": ExtractionCompletedPayload,
+    "QualityAssessmentCompleted": QualityAssessmentCompletedPayload,
+    "AgentOutputWritten": AgentOutputWrittenPayload,
 }
 
 
